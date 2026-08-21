@@ -1,0 +1,106 @@
+name: build-release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            asset: pack2text-v0.1.0-linux-x86_64
+            ext: ""
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: pack2text-v0.1.0-windows-x86_64
+            ext: ".exe"
+            archive: zip
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            asset: pack2text-v0.1.0-macos-aarch64
+            ext: ""
+            archive: tar.gz
+            extra_arch: x86_64-apple-darwin
+            extra_asset: pack2text-v0.1.0-macos-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Add extra target (macOS Intel cross)
+        if: matrix.extra_arch != ''
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.extra_arch }}
+
+      - name: Lint and format
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo fmt --check
+
+      - name: Test
+        run: cargo test --target ${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build extra arch (macOS Intel)
+        if: matrix.extra_arch != ''
+        run: cargo build --release --target ${{ matrix.extra_arch }}
+
+      - name: Context menu smoke test (macOS only)
+        if: runner.os == 'macOS'
+        run: |
+          BIN="target/${{ matrix.target }}/release/pack2text"
+          "$BIN" --install-menu
+          test -d "$HOME/Library/Services/Pack to Clipboard.workflow" || exit 1
+          test -d "$HOME/Library/Services/Pack to Text.workflow" || exit 1
+          "$BIN" --uninstall-menu
+          test ! -d "$HOME/Library/Services/Pack to Clipboard.workflow" || exit 1
+
+      - name: Package
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/pack2text${{ matrix.ext }}" "dist/${{ matrix.asset }}${{ matrix.ext }}"
+          if [ -n "${{ matrix.extra_arch }}" ]; then
+            cp "target/${{ matrix.extra_arch }}/release/pack2text" "dist/${{ matrix.extra_asset }}"
+          fi
+          cp LICENSE README.md dist/
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            python3 -c "import sys,zipfile; a=sys.argv[1]; e=sys.argv[2]; z=zipfile.ZipFile(a+'.zip','w',zipfile.ZIP_DEFLATED); [z.write(f) for f in (a+e,'LICENSE','README.md')]; z.close()" "${{ matrix.asset }}" "${{ matrix.ext }}"
+          else
+            tar czf "${{ matrix.asset }}.tar.gz" "${{ matrix.asset }}${{ matrix.ext }}" LICENSE README.md
+          fi
+          if [ -n "${{ matrix.extra_arch }}" ]; then
+            tar czf "${{ matrix.extra_asset }}.tar.gz" "${{ matrix.extra_asset }}" LICENSE README.md
+          fi
+
+      - name: Upload or replace release asset
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd dist
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            FILES="${{ matrix.asset }}.zip"
+          else
+            FILES="${{ matrix.asset }}.tar.gz"
+          fi
+          if [ -n "${{ matrix.extra_arch }}" ]; then
+            FILES="$FILES ${{ matrix.extra_asset }}.tar.gz"
+          fi
+          gh release upload v0.1.0 $FILES --clobber --repo "${{ github.repository }}"
